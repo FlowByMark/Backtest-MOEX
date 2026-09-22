@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+
+# Загруженные котировки и сгенерированные графики
+_si_moex_cache/
+Si_open_2026_5m.html
+Si_open_2026_5m_previous.html
+
+# Личная разметка исследования
+Si_research_data.json
+Si_research_data.json.bak
+Si_research_project_2026.zip
+
+# Локальные архивы и служебные файлы
+*.zip
+/upload/
+/.codex/
+.DS_Store
+Thumbs.db
