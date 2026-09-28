@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Backtest MOEX — реплей</title>
+<style>
+:root{color-scheme:dark;font:14px system-ui,Arial;background:#0b1016;color:#dce6ef}
+*{box-sizing:border-box}body{margin:0}button,select,input{background:#192633;border:1px solid #344759;border-radius:5px;color:#dce6ef;padding:6px 9px;font:inherit}button{cursor:pointer}button:hover{border-color:#6c9db5}button.active{background:#345065;border-color:#72b7e3}
+header{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:10px 14px;border-bottom:1px solid #263642;background:#111a23}header h1{font-size:16px;margin:0 18px 0 0}label{display:flex;gap:5px;align-items:center;color:#aabac8}.muted{color:#91a3b2}.status{min-height:34px;padding:8px 14px;color:#e2b976;background:#111a23}
+.layout{height:calc(100vh - 137px);min-height:400px;display:flex;flex-direction:column}.panel{min-height:130px;display:flex;flex-direction:column;overflow:hidden}.panel:first-child{height:50%}.panel:only-of-type{height:100%!important}.panelbar{height:36px;flex:none;display:flex;align-items:center;gap:8px;padding:4px 12px;background:#111a23;border-bottom:1px solid #263642}.panelbar strong{min-width:30px}.chart{width:100%;height:100%;display:block;cursor:crosshair;touch-action:none}.resize{height:7px;background:#354757;cursor:row-resize;flex:none}.layout.single .panel.second,.layout.single .resize{display:none}.layout.single .panel:first-child{height:100%!important}
+footer{border-top:1px solid #263642;background:#111a23;padding:8px 14px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}.seek{flex:1;min-width:170px;padding:0}small{color:#91a3b2}
+</style>
+</head>
+<body>
+<header><h1>Backtest MOEX <small>первая версия реплея</small></h1>
+<label>С <input id="from" type="date"></label><label>По <input id="till" type="date"></label>
+<button id="load">Открыть период</button><button id="layout">Два графика</button>
+<label>Окно <select id="span"><option value="12">12 часов</option><option value="36" selected>36 часов</option><option value="168">7 дней</option><option value="720">30 дней</option></select></label>
+<button id="level">Поставить уровень</button><button id="undo">Удалить последний уровень</button>
+</header>
+<div class="status" id="status">Выберите период с загруженными минутными данными. Для загрузки используйте команду из README.</div>
+<div class="layout" id="layoutBox">
+ <section class="panel" id="top"><div class="panelbar"><strong>Si</strong><label>Таймфрейм <select id="tfSi"></select></label><span class="muted" id="labelSi"></span></div><canvas class="chart" id="chartSi"></canvas></section>
+ <div class="resize" id="divider"></div>
+ <section class="panel second" id="bottom"><div class="panelbar"><strong>CR</strong><label>Таймфрейм <select id="tfCR"></select></label><span class="muted" id="labelCR"></span></div><canvas class="chart" id="chartCR"></canvas></section>
+</div>
+<footer><button id="prev">◀ Свеча</button><button id="play">▶ Воспроизвести</button><button id="next">Свеча ▶</button>
+<input class="seek" id="seek" type="range" min="0" max="0" value="0">
+<span id="clock">—</span><small>Показаны только завершённые M1-свечи. Уровень остаётся после перезапуска.</small></footer>
+<script>
+const $=id=>document.getElementById(id);
+const frames=['M1','M5','M15','H1','H4','D1','W1','MN1'];
+for(const id of ['tfSi','tfCR']) $(id).innerHTML=frames.map(tf=>'<option>'+tf+'</option>').join('');
+const state={Si:[],CR:[],times:[],marks:[],playing:null,markMode:false,panels:2,span:36};
+const ms=s=>Date.parse(s.replace(' ','T')+'Z');
+const stamp=d=>d.toISOString().slice(0,10);
+const today=new Date(), weekAgo=new Date(today.getTime()-7*86400000);
+$('from').value=stamp(weekAgo);$('till').value=stamp(today);
+function status(message){$('status').textContent=message}
+function bucket(row,tf){
+ const d=new Date(ms(row.begin)),date=row.begin.slice(0,10);
+ if(tf==='MN1')return date.slice(0,7)+'-01T00:00:00';
+ if(tf==='W1'){d.setUTCDate(d.getUTCDate()-(d.getUTCDay()+6)%7);return d.toISOString().slice(0,10)+'T00:00:00'}
+ if(tf==='D1')return date+'T00:00:00';
+ const size={M1:1,M5:5,M15:15,H1:60,H4:240}[tf];
+ const n=Math.floor((d.getUTCHours()*60+d.getUTCMinutes())/size)*size;
+ return date+'T'+String(Math.floor(n/60)).padStart(2,'0')+':'+String(n%60).padStart(2,'0')+':00'
+}
+function aggregate(rows,tf,cutoff){
+ const out=[];let current=null;
+ for(const r of rows){if(ms(r.end)>cutoff)break;
+  const k=r.contract+'|'+bucket(r,tf);
+  if(!current||current.key!==k){current={key:k,contract:r.contract,begin:bucket(r,tf),end:r.end,open:r.open,high:r.high,low:r.low,close:r.close,volume:r.volume};out.push(current)}
+  else{current.end=r.end;current.high=Math.max(current.high,r.high);current.low=Math.min(current.low,r.low);current.close=r.close;current.volume+=r.volume}
+ }
+ return out;
+}
+function cutoff(){return state.times.length?ms(state.times[+$('seek').value]):0}
+function fit(canvas){
+ const rect=canvas.getBoundingClientRect(),ratio=window.devicePixelRatio||1;
+ canvas.width=Math.max(1,Math.round(rect.width*ratio));canvas.height=Math.max(1,Math.round(rect.height*ratio));
+ const ctx=canvas.getContext('2d');ctx.setTransform(ratio,0,0,ratio,0,0);
+ return {ctx,w:rect.width,h:rect.height};
+}
+function paint(instrument){
+ const canvas=$('chart'+instrument),{ctx,w,h}=fit(canvas);ctx.fillStyle='#0b1118';ctx.fillRect(0,0,w,h);
+ if(w<100||h<70)return;
+ const time=cutoff(),right=w-80,left=12,top=18,bottom=h-28;
+ const viewStart=time-state.span*3600000;
+ const tf=$('tf'+instrument).value;
+ const bars=aggregate(state[instrument],tf,time).filter(b=>ms(b.end)>=viewStart);
+ if(!bars.length){ctx.fillStyle='#96aabd';ctx.fillText('Нет свечей в этом участке. Проверьте загрузку и охват данных.',20,50);return}
+ let low=Math.min(...bars.map(b=>b.low)),high=Math.max(...bars.map(b=>b.high));
+ const shownMarks=state.marks.filter(m=>m.instrument===instrument&&ms(m.created_at)<=time&&m.price>0);
+ const relevant=shownMarks.filter(m=>m.price>=low-(high-low)*0.15&&m.price<=high+(high-low)*0.15);
+ for(const m of relevant){low=Math.min(low,m.price);high=Math.max(high,m.price)}
+ const pad=Math.max((high-low)*0.08,Math.abs(high)*0.0001,0.001);low-=pad;high+=pad;
+ const y=p=>bottom-(p-low)/(high-low)*(bottom-top);
+ const x=t=>left+(t-viewStart)/(time-viewStart)*(right-left);
+ ctx.font='12px system-ui';ctx.textAlign='right';
+ for(let i=0;i<=4;i++){let yy=top+i*(bottom-top)/4;ctx.strokeStyle='#263543';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(left,yy);ctx.lineTo(right,yy);ctx.stroke();ctx.fillStyle='#9db0bf';ctx.fillText((high-(high-low)*i/4).toLocaleString('ru-RU',{maximumFractionDigits:3}),w-6,yy+4)}
+ let lastContract='';
+ const candleW=Math.max(1,Math.min(13,(right-left)/Math.max(25,bars.length)*0.8));
+ for(const b of bars){const xx=x(ms(b.begin));if(xx<left||xx>right)continue;
+  if(lastContract&&lastContract!==b.contract){ctx.strokeStyle='#d6a658';ctx.setLineDash([5,5]);ctx.beginPath();ctx.moveTo(xx,top);ctx.lineTo(xx,bottom);ctx.stroke();ctx.setLineDash([])}
+  lastContract=b.contract;
+  ctx.strokeStyle=ctx.fillStyle=b.close>=b.open?'#2cb9a0':'#d35165';
+  ctx.beginPath();ctx.moveTo(xx,y(b.high));ctx.lineTo(xx,y(b.low));ctx.stroke();
+  ctx.fillRect(xx-candleW/2,Math.min(y(b.open),y(b.close)),candleW,Math.max(1,Math.abs(y(b.close)-y(b.open))));
+ }
+ for(const m of shownMarks){const yy=y(m.price);if(yy<top||yy>bottom)continue;
+  ctx.strokeStyle='#e8aa52';ctx.setLineDash([7,4]);ctx.beginPath();ctx.moveTo(left,yy);ctx.lineTo(right,yy);ctx.stroke();ctx.setLineDash([]);
+  ctx.fillStyle='#e8aa52';ctx.textAlign='right';ctx.fillText(Number(m.price).toLocaleString('ru-RU',{maximumFractionDigits:3}),w-6,yy-4)
+ }
+ ctx.textAlign='left';ctx.fillStyle='#91a7b8';
+ for(let i=0;i<5;i++){const t=viewStart+(time-viewStart)*i/4;ctx.fillText(new Date(t).toISOString().slice(5,16).replace('T',' '),left+(right-left)*i/4,bottom+18)}
+ $('label'+instrument).textContent=bars.at(-1).contract+' · '+bars.length+' свечей в окне';
+ canvas.dataset.low=low;canvas.dataset.high=high;canvas.dataset.top=top;canvas.dataset.bottom=bottom;
+}
+function draw(){
+ const t=cutoff();$('clock').textContent=t?new Date(t).toISOString().slice(0,16).replace('T',' ')+' МСК':'—';
+ paint('Si');if(state.panels===2)paint('CR');
+}
+async function load(){
+ const from=$('from').value,till=$('till').value;
+ if(!from||!till){status('Укажите период.');return}
+ const end=new Date(ms(till+'T00:00:00')+86400000).toISOString().slice(0,19);
+ const start=from+'T00:00:00';
+ if(ms(end)-ms(start)>31*86400000||ms(end)<=ms(start)){status('Выберите не более 31 дня за один просмотр. Загруженная история при этом хранится непрерывно.');return}
+ status('Открываю локальную историю...');
+ try{
+  const result=await Promise.all(['Si','CR'].map(async inst=>{
+   const url='/api/minutes?instrument='+inst+'&from='+encodeURIComponent(start)+'&till='+encodeURIComponent(end);
+   const r=await fetch(url);const data=await r.json();if(!r.ok)throw Error(data.error);return data;
+  }));
+  state.Si=result[0];state.CR=result[1];
+  state.times=[...new Set(result.flatMap(rows=>rows.map(r=>r.end)))].sort();
+  $('seek').max=Math.max(0,state.times.length-1);$('seek').value=$('seek').max;
+  status('Si: '+result[0].length+' M1; CR: '+result[1].length+' M1. '+(state.times.length?'Данные открыты; перемещайтесь по истории ползунком или по свече.':'Период пуст. Проверьте командой coverage.'));
+  draw();
+ }catch(e){status('Ошибка: '+e.message)}
+}
+async function saveMarks(){
+ try{const r=await fetch('/api/marks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(state.marks)});
+  if(!r.ok)throw Error((await r.json()).error);status('Уровень сохранён на диск.')
+ }catch(e){status('Не удалось сохранить уровень: '+e.message)}
+}
+for(const instrument of ['Si','CR'])$('chart'+instrument).addEventListener('click',e=>{
+ if(!state.markMode||!state.times.length)return;
+ const canvas=e.currentTarget,rect=canvas.getBoundingClientRect(),yy=e.clientY-rect.top;
+ const low=+canvas.dataset.low,high=+canvas.dataset.high,top=+canvas.dataset.top,bottom=+canvas.dataset.bottom;
+ if(yy<top||yy>bottom||!Number.isFinite(low)||high<=low)return;
+ const price=low+(bottom-yy)/(bottom-top)*(high-low);
+ state.marks.push({instrument,price:Math.round(price*1000)/1000,created_at:state.times[+$('seek').value],type:'level'});
+ state.markMode=false;$('level').classList.remove('active');draw();saveMarks();
+});
+$('load').onclick=load;
+$('seek').oninput=draw;
+$('prev').onclick=()=>{$('seek').value=Math.max(0,+$('seek').value-1);draw()};
+$('next').onclick=()=>{$('seek').value=Math.min(+$('seek').max,+$('seek').value+1);draw()};
+$('play').onclick=()=>{
+ if(state.playing){clearInterval(state.playing);state.playing=null;$('play').textContent='▶ Воспроизвести';return}
+ state.playing=setInterval(()=>{if(+$('seek').value >= +$('seek').max){$('play').click();return}$('next').click()},180);
+ $('play').textContent='❚❚ Пауза'
+};
+$('span').onchange=e=>{state.span=+e.target.value;draw()};
+for(const id of ['tfSi','tfCR'])$(id).onchange=draw;
+$('layout').onclick=()=>{
+ state.panels=state.panels===2?1:2;$('layoutBox').classList.toggle('single',state.panels===1);
+ $('layout').textContent=state.panels===2?'Два графика':'Один график';draw()
+};
+$('level').onclick=()=>{state.markMode=!state.markMode;$('level').classList.toggle('active',state.markMode);status(state.markMode?'Кликните по цене на нужном графике. Уровень станет виден с текущего момента реплея.':'Выбор уровня отменён.')};
+$('undo').onclick=()=>{if(!state.marks.length)return;state.marks.pop();draw();saveMarks()};
+const divider=$('divider'),topPanel=$('top');let resizing=false;
+divider.onpointerdown=e=>{resizing=true;divider.setPointerCapture(e.pointerId)};
+divider.onpointermove=e=>{if(!resizing)return;const box=$('layoutBox').getBoundingClientRect();topPanel.style.height=Math.min(80,Math.max(20,(e.clientY-box.top)/box.height*100))+'%';draw()};
+divider.onpointerup=()=>{resizing=false};
+window.onresize=draw;
+fetch('/api/marks').then(r=>r.json()).then(m=>{state.marks=Array.isArray(m)?m:[];draw()}).catch(()=>status('Не удалось прочитать сохранённые уровни.'));
+</script>
+</body>
+</html>

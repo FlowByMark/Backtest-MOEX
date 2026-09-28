@@ -17,3 +17,6 @@ Si_research_project_2026.zip
 /.codex/
 .DS_Store
 Thumbs.db
+
+# New platform: historical database and private drawings
+backtest_data/
