@@ -10,7 +10,6 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 TIMEFRAMES = {"M1", "M5", "M15", "H1", "H4", "D1", "W1", "MN1"}
 INSTRUMENTS = {"Si": "Si", "CR": "CR"}
@@ -135,7 +134,10 @@ def download_range(db: sqlite3.Connection, first: dt.date, last: dt.date,
                    workers: int = 4, progress=print) -> dict:
     if first > last or first.year != 2026 or last.year != 2026:
         raise ValueError("Choose an ordered range inside 2026")
-    today_moscow = dt.datetime.now(ZoneInfo("Europe/Moscow")).date()
+    # Moscow time is UTC+03:00 in the supported 2026 history. A fixed offset
+    # keeps the standard-library-only Windows installation independent of the
+    # optional IANA tzdata package (often absent in Microsoft Store Python).
+    today_moscow = dt.datetime.now(dt.timezone(dt.timedelta(hours=3))).date()
     last = min(last, today_moscow)
     jobs = []
     day = first

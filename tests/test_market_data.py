@@ -2,8 +2,9 @@ import datetime as dt
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from backtest.market_data import (aggregate, connect, contract_for,
+from backtest.market_data import (aggregate, connect, contract_for, download_range,
                                   coverage, minute_window, store_day)
 
 
@@ -70,6 +71,23 @@ class MarketDataTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     store_day(db, day, "Si", "SiZ6", [bad])
                 self.assertEqual(coverage(db), [])
+
+    def test_download_runs_without_system_timezone_database(self):
+        day = dt.date(2026, 9, 24)
+
+        def fake_request(requested_day, contract):
+            self.assertEqual(requested_day, day)
+            return [{"begin": "2026-09-24 09:00:00", "end": "2026-09-24 09:01:00",
+                     "open": 100, "high": 101, "low": 99, "close": 100, "volume": 1}]
+
+        with tempfile.TemporaryDirectory() as temp, patch(
+                "backtest.market_data.request_day", side_effect=fake_request) as request:
+            with connect(Path(temp) / "market.sqlite3") as db:
+                result = download_range(db, day, day, progress=lambda _: None)
+                self.assertEqual((result["ready"], result["error"]), (2, 0))
+                self.assertEqual({x["contract"] for x in coverage(db)}, {"SiZ6", "CRZ6"})
+                download_range(db, day, day, progress=lambda _: None)
+                self.assertEqual(request.call_count, 2)
 
 
 if __name__ == "__main__":
